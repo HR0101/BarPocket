@@ -1,0 +1,29 @@
+# ===== macOS =====
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+
+# ===== Xcode: ビルド成果物 =====
+build/
+DerivedData/
+*.xcuserstate
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# ===== Xcode: ユーザー固有データ =====
+xcuserdata/
+*.xccheckout
+*.xcscmblueprint
+
+# ===== Swift Package Manager =====
+.build/
+.swiftpm/
+
+# ===== アセットカタログ（指定により除外） =====
+# 注意: Assets.xcassets はビルドに必要なため、
+# 除外するとクローン時にアプリアイコン等の再作成が必要です。
+Assets.xcassets/
