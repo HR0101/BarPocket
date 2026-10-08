@@ -11,12 +11,15 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// 一覧・設定をまとめた共通コンテンツ.
 struct StashContentView: View {
   @ObservedObject var store: FileStore
   @ObservedObject var loginManager: LoginItemManager
+  var isMenuBar: Bool = false
+
   // ファイルをドロップ中かどうか(枠のハイライト用).
   @State private var isDropTargeted = false
+  // 全削除の確認アラート表示用.
+  @State private var showingClearConfirm = false
 
   var body: some View {
     VStack(spacing: 0) {
@@ -84,13 +87,21 @@ struct StashContentView: View {
       .help(isAllSelected ? "選択を解除" : "すべて選択")
       // 手動でリストを空にするボタン.
       Button {
-        store.clearAll()
+        showingClearConfirm = true
       } label: {
         Image(systemName: "trash")
       }
       .buttonStyle(.borderless)
       .disabled(store.items.isEmpty)
       .help("リストを空にする")
+      .alert("リストを空にしますか？", isPresented: $showingClearConfirm) {
+        Button("キャンセル", role: .cancel) { }
+        Button("空にする", role: .destructive) {
+          store.clearAll()
+        }
+      } message: {
+        Text("すべてのファイルがゴミ箱へ移動されます。")
+      }
     }
     .padding(.horizontal, 12)
     .padding(.vertical, 8)
@@ -99,27 +110,29 @@ struct StashContentView: View {
   /// 下部の設定(自動起動トグル)と操作ヒント.
   private var footer: some View {
     VStack(spacing: 8) {
-      // ログイン時に自動起動するかどうかのトグル.
-      Toggle(isOn: loginItemBinding) {
-        Label("ログイン時に起動", systemImage: "power")
-          .font(.callout)
-      }
-      .toggleStyle(.switch)
-      .controlSize(.small)
+      if !isMenuBar {
+        // ログイン時に自動起動するかどうかのトグル(メインウインドウのみ表示).
+        Toggle(isOn: loginItemBinding) {
+          Label("ログイン時に起動", systemImage: "power")
+            .font(.callout)
+        }
+        .toggleStyle(.switch)
+        .controlSize(.small)
 
-      // 承認待ちや失敗時のメッセージ.
-      if let message = loginManager.statusMessage {
-        Text(message)
-          .font(.caption2)
-          .foregroundStyle(.orange)
-          .frame(maxWidth: .infinity, alignment: .leading)
+        // 承認待ちや失敗時のメッセージ.
+        if let message = loginManager.statusMessage {
+          Text(message)
+            .font(.caption2)
+            .foregroundStyle(.orange)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
       }
 
       // 項目があるときだけ操作ヒントを表示する.
       if !store.items.isEmpty {
         VStack(spacing: 2) {
           Text("クリックで選択 ・ ⌘/⇧で複数選択")
-          Text("ドラッグで取り出し（消える） ・ コピーで複製（残す）")
+          Text("ドラッグで取り出し ・ ダブルクリックで開く")
         }
         .font(.caption2)
         .foregroundStyle(.secondary)
@@ -127,9 +140,27 @@ struct StashContentView: View {
         .frame(maxWidth: .infinity)
       }
 
-      // アプリを終了するボタン(メニューの ⌘Q でも終了可能).
+      // 下部ボタン領域
       HStack {
+        if isMenuBar {
+          // メニューバーの場合は、通常ウインドウ(設定)を呼び出すボタンを配置
+          Button {
+            NSApp.activate(ignoringOtherApps: true)
+            if let window = NSApp.windows.first(where: { $0.title == "BarPocket" || $0.className.contains("SwiftUI") }) {
+              window.makeKeyAndOrderFront(nil)
+            }
+          } label: {
+            Label("設定...", systemImage: "gearshape")
+              .font(.caption)
+          }
+          .buttonStyle(.borderless)
+          .controlSize(.small)
+          .foregroundStyle(.secondary)
+        }
+        
         Spacer()
+        
+        // アプリを終了するボタン(メニューの ⌘Q でも終了可能).
         Button {
           NSApplication.shared.terminate(nil)
         } label: {
@@ -223,7 +254,7 @@ struct MainView: View {
   let loginManager: LoginItemManager
 
   var body: some View {
-    StashContentView(store: store, loginManager: loginManager)
+    StashContentView(store: store, loginManager: loginManager, isMenuBar: false)
       .frame(minWidth: 360, idealWidth: 380, minHeight: 480, idealHeight: 560)
   }
 }
@@ -234,8 +265,8 @@ struct PopoverView: View {
   let loginManager: LoginItemManager
 
   var body: some View {
-    StashContentView(store: store, loginManager: loginManager)
-      .frame(width: 340, height: 460)
+    StashContentView(store: store, loginManager: loginManager, isMenuBar: true)
+      .frame(width: 300, height: 400)
   }
 }
 
@@ -277,15 +308,15 @@ struct FileRowView: View {
       .buttonStyle(.borderless)
       .help("コピー（リストに残す）")
 
-      // 個別削除ボタン(ドラッグ領域の外側に配置).
+      // 個別削除ボタン(ドラッグ領域の外側に配置). 元の場所に戻す処理に切り替え.
       Button {
-        store.remove(item)
+        store.restore(item)
       } label: {
-        Image(systemName: "xmark.circle.fill")
+        Image(systemName: "arrow.uturn.backward.circle.fill")
           .foregroundStyle(.secondary)
       }
       .buttonStyle(.borderless)
-      .help("この項目を削除")
+      .help("元の場所に戻す")
     }
     .padding(.horizontal, 12)
     .padding(.vertical, 6)
@@ -295,5 +326,20 @@ struct FileRowView: View {
         ? Color.accentColor.opacity(0.18)
         : Color.clear
     )
+    .contextMenu {
+      Button("開く") {
+        NSWorkspace.shared.open(item.url)
+      }
+      Button("Finderで表示") {
+        NSWorkspace.shared.activateFileViewerSelecting([item.url])
+      }
+      Divider()
+      Button("コピー") {
+        store.copyToPasteboard(activatedBy: item)
+      }
+      Button("元の場所に戻す") {
+        store.restore(item)
+      }
+    }
   }
 }

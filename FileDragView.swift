@@ -63,6 +63,13 @@ final class DraggingSourceView: NSView, NSDraggingSource, NSFilePromiseProviderD
     clickedWithoutModifier = false
 
     guard let item, let store else { return }
+
+    // UX改善: ダブルクリックでファイルを直接開く.
+    if event.clickCount == 2 {
+      NSWorkspace.shared.open(item.url)
+      return
+    }
+
     let flags = event.modifierFlags
 
     if flags.contains(.command) {
@@ -184,9 +191,14 @@ final class DraggingSourceView: NSView, NSDraggingSource, NSFilePromiseProviderD
       try FileManager.default.copyItem(at: item.url, to: destination)
       completionHandler(nil)
       // コピーが完了してから, 元の項目をリストと実体から取り除く(取り出し＝消える).
-      store?.removeItems([item])
+      // 取り出し完了時は実体を完全に削除し、ゴミ箱の肥大化を防ぐ.
+      // 保守性向上のため、UI・状態の更新は必ずメインスレッドで行う.
+      DispatchQueue.main.async {
+        self.store?.removeItems([item], permanently: true)
+      }
     } catch {
-      // コピーに失敗した場合は元を残し, エラーを通知する.
+      // コピーに失敗した場合は元を残し、中途半端なコピー先ファイルがあれば削除してロールバック（元に戻す）する.
+      try? FileManager.default.removeItem(at: destination)
       NSLog("BarPocket: 取り出しコピーに失敗しました - \(error.localizedDescription)")
       completionHandler(error)
     }

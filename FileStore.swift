@@ -3,7 +3,7 @@
 //  BarPocket
 //
 //  保持しているファイルの一覧を管理するモデル.
-//  ドロップされたファイルはアプリ専用のストック用ディレクトリへコピーして保持する.
+//  ドロップされたファイルはアプリ専用のストック用ディレクトリへ移動して保持する.
 //
 
 import AppKit
@@ -13,7 +13,7 @@ import SwiftUI
 /// ストックされた 1 ファイルを表すモデル.
 struct StashItem: Identifiable, Equatable {
   let id = UUID()
-  /// ストック用ディレクトリ内にコピーされた実体のパス.
+  /// ストック用ディレクトリ内に移動された実体のパス.
   let url: URL
 
   /// 表示用のファイル名.
@@ -39,7 +39,7 @@ final class FileStore: ObservableObject {
   /// 範囲選択(⇧クリック)の起点となる項目 id.
   private var selectionAnchorID: UUID?
 
-  /// ファイル実体をコピーして保持するためのディレクトリ.
+  /// ファイル実体を移動して保持するためのディレクトリ.
   private let stashDirectory: URL
 
   init() {
@@ -66,31 +66,87 @@ final class FileStore: ObservableObject {
   /// 複数ファイルをストックへ追加する.
   func addFiles(urls: [URL]) {
     for url in urls {
-      copyIntoStash(url)
+      moveIntoStash(url)
     }
   }
 
-  /// 指定した項目をストックから取り除き, 実体も削除する.
-  func remove(_ item: StashItem) {
-    deleteFile(at: item.url)
+  /// 指定した項目をストックから取り除く.
+  func remove(_ item: StashItem, permanently: Bool = false) {
+    deleteFile(at: item.url, permanently: permanently)
     items.removeAll { $0.id == item.id }
     selection.remove(item.id)
+    removeOriginalURL(for: item.url)
   }
 
-  /// 複数項目をまとめてストックから取り除き, 実体も削除する.
-  func removeItems(_ targets: [StashItem]) {
+  /// 指定した項目を元の場所へ戻す (Xボタン用).
+  func restore(_ item: StashItem) {
+    if let originalPath = getOriginalURL(for: item.url) {
+      do {
+        // 元の場所へ移動. 同名ファイルがある場合はリネームして衝突回避.
+        var destination = originalPath
+        var index = 1
+        let baseName = (originalPath.lastPathComponent as NSString).deletingPathExtension
+        let pathExtension = (originalPath.lastPathComponent as NSString).pathExtension
+        let parentDir = originalPath.deletingLastPathComponent()
+
+        while FileManager.default.fileExists(atPath: destination.path) {
+          let newName = pathExtension.isEmpty ? "\(baseName) \(index)" : "\(baseName) \(index).\(pathExtension)"
+          destination = parentDir.appendingPathComponent(newName)
+          index += 1
+        }
+
+        try FileManager.default.moveItem(at: item.url, to: destination)
+        items.removeAll { $0.id == item.id }
+        selection.remove(item.id)
+        removeOriginalURL(for: item.url)
+        return
+      } catch {
+        NSLog("BarPocket: 元の場所への復元に失敗しました - \(error.localizedDescription)")
+      }
+    }
+    
+    // オリジナルのパスが不明、または移動に失敗した場合はデスクトップへ移動する
+    do {
+      let desktop = try FileManager.default.url(for: .desktopDirectory, in: .userDomainMask, appropriateFor: nil, create: false)
+      let destination = desktop.appendingPathComponent(item.url.lastPathComponent)
+      
+      // デスクトップで同名ファイルがある場合
+      var finalDestination = destination
+      var index = 1
+      let baseName = (destination.lastPathComponent as NSString).deletingPathExtension
+      let pathExtension = (destination.lastPathComponent as NSString).pathExtension
+      while FileManager.default.fileExists(atPath: finalDestination.path) {
+        let newName = pathExtension.isEmpty ? "\(baseName) \(index)" : "\(baseName) \(index).\(pathExtension)"
+        finalDestination = desktop.appendingPathComponent(newName)
+        index += 1
+      }
+      
+      try FileManager.default.moveItem(at: item.url, to: finalDestination)
+      items.removeAll { $0.id == item.id }
+      selection.remove(item.id)
+      removeOriginalURL(for: item.url)
+    } catch {
+      NSLog("BarPocket: デスクトップへの復元にも失敗しました - \(error.localizedDescription)")
+      remove(item) // 最終手段としてゴミ箱へ
+    }
+  }
+
+  /// 複数項目をまとめてストックから取り除く.
+  func removeItems(_ targets: [StashItem], permanently: Bool = false) {
     let ids = Set(targets.map { $0.id })
     for target in targets {
-      deleteFile(at: target.url)
+      deleteFile(at: target.url, permanently: permanently)
+      removeOriginalURL(for: target.url)
     }
     items.removeAll { ids.contains($0.id) }
     selection.subtract(ids)
   }
 
-  /// すべての項目をクリアし, 実体も削除する.
-  func clearAll() {
+  /// すべての項目をクリアする.
+  func clearAll(permanently: Bool = false) {
     for item in items {
-      deleteFile(at: item.url)
+      deleteFile(at: item.url, permanently: permanently)
+      removeOriginalURL(for: item.url)
     }
     items.removeAll()
     clearSelection()
@@ -211,8 +267,8 @@ final class FileStore: ObservableObject {
 
   // MARK: - 内部処理
 
-  /// ファイルをストック用ディレクトリへコピーして一覧へ追加する.
-  private func copyIntoStash(_ source: URL) {
+  /// ファイルをストック用ディレクトリへ移動して一覧へ追加する.
+  private func moveIntoStash(_ source: URL) {
     let fileManager = FileManager.default
     let destination = uniqueDestination(for: source.lastPathComponent)
 
@@ -225,14 +281,25 @@ final class FileStore: ObservableObject {
     }
 
     do {
+      // 安全に移動するため、まずコピーを行い、成功した場合のみ元ファイルを削除する.
       try fileManager.copyItem(at: source, to: destination)
+      
+      do {
+        try fileManager.removeItem(at: source)
+      } catch {
+        // 元ファイルの削除に失敗した場合は、コピー先のファイルを消して完全に元に戻す（ロールバック）
+        try? fileManager.removeItem(at: destination)
+        throw error
+      }
+
       let item = StashItem(url: destination)
       if !items.contains(item) {
         items.append(item)
       }
+      saveOriginalURL(source, for: destination)
     } catch {
-      // コピーに失敗した場合はログを残して継続する.
-      NSLog("BarPocket: ファイルのコピーに失敗しました - \(error.localizedDescription)")
+      // 移動に失敗した場合は状態を元に戻し、ログを残す.
+      NSLog("BarPocket: ファイルの移動に失敗しました - \(error.localizedDescription)")
     }
   }
 
@@ -259,10 +326,14 @@ final class FileStore: ObservableObject {
     return candidate
   }
 
-  /// ファイル実体を削除する.
-  private func deleteFile(at url: URL) {
+  /// ファイル実体を削除（デフォルトはゴミ箱へ移動）する.
+  private func deleteFile(at url: URL, permanently: Bool = false) {
     do {
-      try FileManager.default.removeItem(at: url)
+      if permanently {
+        try FileManager.default.removeItem(at: url)
+      } else {
+        try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+      }
     } catch {
       NSLog("BarPocket: ファイルの削除に失敗しました - \(error.localizedDescription)")
     }
@@ -293,5 +364,27 @@ final class FileStore: ObservableObject {
     items = contents
       .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
       .map { StashItem(url: $0) }
+  }
+
+  // MARK: - Original URL Mapping
+
+  private func saveOriginalURL(_ source: URL, for stashURL: URL) {
+    var dict = UserDefaults.standard.dictionary(forKey: "OriginalURLs") as? [String: String] ?? [:]
+    dict[stashURL.lastPathComponent] = source.path
+    UserDefaults.standard.set(dict, forKey: "OriginalURLs")
+  }
+
+  private func getOriginalURL(for stashURL: URL) -> URL? {
+    let dict = UserDefaults.standard.dictionary(forKey: "OriginalURLs") as? [String: String] ?? [:]
+    if let path = dict[stashURL.lastPathComponent] {
+      return URL(fileURLWithPath: path)
+    }
+    return nil
+  }
+
+  private func removeOriginalURL(for stashURL: URL) {
+    var dict = UserDefaults.standard.dictionary(forKey: "OriginalURLs") as? [String: String] ?? [:]
+    dict.removeValue(forKey: stashURL.lastPathComponent)
+    UserDefaults.standard.set(dict, forKey: "OriginalURLs")
   }
 }
